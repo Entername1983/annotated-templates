@@ -1,0 +1,288 @@
+# Project name, exposed as an env variable as COMPOSE_PROJECT_NAME
+# This is used to prefix the names of the containers
+# and the networks created by docker-compose
+# https://docs.docker.com/reference/compose-file/version-and-name/
+name: my_compose_template
+
+# https://docs.docker.com/reference/compose-file/services/
+services:
+  ## Service name
+  server:
+    ## Container name - defaults to service name
+    ## !! Will not scale a service beyond one container if there is a service name !!
+    container_name: server
+
+    ######### Building image #########
+    build:
+      # The build context is the directory containing the Dockerfile (or the path to the Dockerfile)
+      # Context can also be the URL to a git repo
+      context: ./server
+      # The Dockerfile to use for the build, relative to the build context
+      dockerfile: ./Dockerfile.dev
+      # Can add args used for build ONLY, won't be available at runtime
+      args:
+        - GIT_COMMIT=1234
+      # Other options: cache_from, cache_to, dockerfile_inkline, extra_hosts, labels
+      # network, no_cache, platform, privileged, pull, secrets, ssh, shm_size, tags
+      # target, ulimits.
+      # https://docs.docker.com/reference/compose-file/build/
+
+    ######### BASICS #########
+    ## sets the working directory for the container, overwrites the Dockerfile
+    working_dir: /code
+    ## Overrides default command declared by container image, such as Dockerfile's CMD
+    ## !! Doesn't run within the context of the shell instructions defined by the image !!
+    command: uvicorn main:app --host 0.0.0.0 --reload
+    restart: unless-stopped ## always, on-failure, unless-stopped, no
+    ## List all the services that should be started before this one
+    depends_on:
+      ## Long syntax
+      redis:
+        condition: service_started ## service_healthy, service_completed_successfully
+        restart: true ## if set to true this service will restart after the dependency restarts
+        required: true ## if set to false then compose will only warn if the dependency is not running
+      ## Short syntax
+      # - postgres
+    ## Adds optionality in terms of which services run
+    # used with docker-compose --profile debug up --> Only services with debug profile will run
+    profiles:
+      - debug
+      - release
+    pull_policy: missing ## missing is default, also always, never, build
+
+    ####### VOLUMES ########
+    ## Define the volumes mapping between host machine and container
+    # !! To re-use volume accross multiple services, named volume must be declared in the volumes top-level element !!
+    # https://docs.docker.com/reference/compose-file/volumes/
+    volumes:
+      - ./server:/code ## volume path relative to the compose file : path in container : access_mode (rw, ro, z, Z)
+    ## Long syntax:
+    #  - type: volume
+    #   source: db-data
+    #   target: /data
+    #   volume:
+    #     nocopy: true
+    #     subpath: sub
+    # - type: bind
+    #   source: /var/run/postgres/postgres.sock
+    #   target: /var/run/postgres/postgres.sock
+    ## Getting the volumes from another service
+    volumes_from:
+      - service_name:container_name:ro ## service:container
+    ## Mounts temporary file system inside the contianer
+    tmpfs:
+      - /tmp #<path>
+      - /data:mode=755,uid=1009,gid=1009 #<path>:<options>
+
+    ####### CONFIG ########
+    ## Inherit common config from different files
+    # !! Compose does not automatically import dependencies, must do so manually !!
+    extends:
+      file: common.yml
+      service: backend
+    ## Grants access to the config and mounts it as files in the container
+    ## Location defaults to /<config_name> in linux
+    ## all configs should have their own corresponding declarations
+    configs:
+      - my_config
+      - my_other_config
+      ## Long syntax
+      - source: my_config ## name of config
+        target: /redis_config ## path and name of file to be mounted
+        uid: "103"
+        gid: "103"
+        mode: 0440 ## permissions - https://wintelguy.com/permissions-calc.pl
+
+    ####### LOGGING ########
+    ## logging config for the service - platform specific
+    logging:
+      driver: syslog
+      options:
+        syslog-address: "tcp://192.168.0.42:123"
+
+    ####### HEALTHCHECK ########
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost"]
+      interval: 1m30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+      start_interval: 5s
+
+    ####### LIFECYCLE ########
+    ## Specifies command to run once container has started
+    # can also use pre_stop
+    # !! Exact timing is not guaranteed
+    post_start:
+      - command: ./do_something_on_startup.sh
+        user: root
+        privileged: true
+        environment:
+          - FOO=BAR
+
+    ####### SECURITY & AUTH ########
+    read_only: true ## sets the container to read only, default is false
+    ## Specifies additional groups by name or number which the user inside the container must be a member of
+    group_add:
+      - mail
+
+    ####### METADATA ########
+    ## Metadata for kubernetes
+    annotations:
+      description: "This is the server service"
+    ## Labels add metadata to the containers.  Works with maps or arrays
+    # can use labels like this docker ps --filter "label=com.example.department=Finance"
+    # !! Use reverse-DNS notation to prevent conflicts with other labels !!
+    # !! com.docker.compose is reserved for compose use !!
+    labels:
+      - "com.example.description=Accounting webapp"
+      - "com.example.department=Finance"
+    ## Can load entire file
+    # !! Path is relative to location of the compose file !!
+    # !! labels take precendence over label_file !!
+    label_file:
+      - ./app.labels
+      - ./additional.labels
+
+    ####### NETWORKING ########
+    ## Define the ports mapping between host machine and container
+    ## !! Must not be used with network_mode: host !!
+    ports:
+      - "5000:8000" ## Internal -- External
+    ## long syntax
+    # - name: web
+    #     target: 80
+    #     host_ip: 127.0.0.1
+    #     published: "8080"
+    #     protocol: tcp
+    #     app_protocol: http
+    #     mode: host
+    ## network_mode: network docs:https://docs.docker.com/engine/network/#container-networks
+    network_mode: "host"
+    # none ,
+    # host - raw access to the hosts network interface
+    # service:[service_name],  container:[container_name] - access by service name or container ID
+    ## List of networks to attach the service to
+    # !! If specific must have a network declared in the networks section !!
+    networks:
+      internal-network-1:
+      other-network:
+        aliases:
+          - internal-network-1
+          - alias2
+    ## Links to service containers outside of the compose app.
+    external_links:
+      - redis
+      - database:mysql
+    ## defines a network link to containers in another service, in same compose file
+    # !! Links are not necessary if using networks !!
+    # !! Implicit dependency between services like in depends_on !!
+    links:
+      - db ##SERVICE
+      - db:database ## SERVICE:ALIAS
+    ## defines incoming port or range that compose exposes
+    ## unecessary if already exposing in dockerfile
+    expose:
+      - "8000"
+    ####### REPLICATION ########
+    ## Specifies the number of containers to run for this service
+    # !! Must be consistent with mode:replicated in deploy !!
+    #   deploy:
+    #       mode: replicated
+    #       replicas: 3
+    scale: 3 ## number of containers to run for this service
+
+    ####### ENV, SECRETS & CONFIG ########
+    ## Specify variables directly
+    environment:
+      - UVICORN_HOST=0.0.0.0
+    ## Specify secrets to pass to the container
+    secrets:
+      - server-certificate
+    # Long syntax
+    # secrets:
+    #   - source: server-certificate
+    #     target: server.cert
+    #     uid: "103"
+    #     gid: "103"
+    #     mode: "0o440"
+    ## Sepcify one or more env files to load environment variables from for RUNTIME
+    ## !! Not available during BUILD, must include them as ARGS for build !!
+    ## !! Path is relative to location of the compose file !!
+    ## Can pass env file(s) or env vars directly
+    env_file:
+      - ../.env
+
+    ####### ADVANCED ########
+    ## Not all advanced options mentioned here, see remaining options and links below
+    ## setting attach to false will prevent compose from collecting service logs, defaults to true
+    attach: true
+    ## limit I/O for a service, see https://docs.docker.com/reference/compose-file/services/#blkio_config
+    blkio_config:
+      weight: 100
+      weight_device:
+        - path: /dev/sda
+          weight: 400
+
+  ## Service name
+  redis:
+    ## Image to start the container.  Should follow Open Container Specs: https://github.com/opencontainers/org/blob/master/docs/docs/introduction/digests.md
+    ## Image is optional if there is a build directive
+    image: redis/redis-stack-server:latest
+    ## runs an init proc3ess inside the container.  Forwards signals and reaps processes
+    # helps to handle shutdowns cleanly and manages child processes properly
+    init: true
+    ports:
+      - "6379:6379"
+    command:
+      [
+        "redis-server",
+        "--requirepass",
+        "UNSAFE_PASSWORD",
+        "--loadmodule /opt/redis-stack/lib/redisearch.so",
+        "--loadmodule /opt/redis-stack/lib/rejson.so",
+      ]
+
+## OTHER OPTIONS ##
+# entrypoint: Overrides the default entrypoint when the container starts
+# useful for setting up env variables, mirgating dbs, running cron jobs before launching app
+# develop: config for maintaining a container in sync with source
+# extra_hosts: Add hostname mappings, resolve custom domains names without external DNS
+# https://docs.docker.com/reference/compose-file/develop/
+# deploy: config for deployment and lifecycle of service
+# https://docs.docker.com/reference/compose-file/deploy/
+# healthcheck: config for healthcheck https://docs.docker.com/reference/dockerfile/#healthcheck
+
+# credential_spec, device_cgroup_rules, devices, dns, dns_search, domainname, driver_opts, gpus
+# hostname, ipc, isolation, mac_address, mem_limit, mem_reservation, mem_swappiness, memswap_limit
+# ipv4_address, ipv6_address, link_local_ips, mac_address, priority, oom_kill_disable, oom_score_adj
+# pid, pids_limit, platform, privileged, runtime, security_opt, shm_size, stdin_open, tty, ulimits, user
+# userns_mode, uts, stop_grace_period, stop_signal, storage_opt, sysctls,
+
+# https://docs.docker.com/reference/compose-file/volumes/
+volumes:
+  minio_data:
+  postgres_data:
+  pgadmin_data:
+
+# https://docs.docker.com/reference/compose-file/networks/
+networks:
+  internal-network-1:
+    driver: bridge # default
+
+# host: remove network isolation, container shares host network
+# none: no networking, container has no network access
+# overlay: Overlay networks connect multiole docker daemons together
+# ipvlan: full control over IPV4 and IPV6 addressing
+# macvlan: assigns a MAC address to a container
+
+# https://docs.docker.com/reference/compose-file/configs/
+configs:
+  my_config:
+    file: ./my_config.txt
+  my_other_config:
+    external: true
+# https://docs.docker.com/reference/compose-file/secrets/
+secrets:
+  server-certificate:
+    file: ./server.cert
